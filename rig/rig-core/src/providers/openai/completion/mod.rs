@@ -156,6 +156,10 @@ pub enum Message {
             serialize_with = "serialize_assistant_content_vec"
         )]
         content: Vec<AssistantContent>,
+        // OpenAI-compatible providers expose hidden reasoning on this non-standard
+        // field, and some require it to be echoed back on assistant tool-call turns.
+        #[serde(skip_serializing_if = "Option::is_none", rename = "reasoning_content")]
+        reasoning: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         refusal: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -572,14 +576,14 @@ impl TryFrom<OneOrMany<message::AssistantContent>> for Vec<Message> {
     fn try_from(value: OneOrMany<message::AssistantContent>) -> Result<Self, Self::Error> {
         let mut text_content = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut reasoning_text = String::new();
 
         for content in value {
             match content {
                 message::AssistantContent::Text(text) => text_content.push(text),
                 message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call),
-                message::AssistantContent::Reasoning(_) => {
-                    // OpenAI Chat Completions does not support assistant-history reasoning items.
-                    // Silently skip unsupported reasoning content.
+                message::AssistantContent::Reasoning(reasoning) => {
+                    reasoning_text.push_str(&reasoning.display_text());
                 }
                 message::AssistantContent::Image(_) => {
                     panic!(
@@ -598,6 +602,11 @@ impl TryFrom<OneOrMany<message::AssistantContent>> for Vec<Message> {
                 .into_iter()
                 .map(|content| content.text.into())
                 .collect::<Vec<_>>(),
+            reasoning: if reasoning_text.is_empty() {
+                None
+            } else {
+                Some(reasoning_text)
+            },
             refusal: None,
             audio: None,
             name: None,
@@ -660,22 +669,25 @@ impl TryFrom<Message> for message::Message {
             Message::Assistant {
                 content,
                 tool_calls,
+                reasoning,
                 ..
             } => {
-                let mut content = content
-                    .into_iter()
-                    .map(|content| match content {
-                        AssistantContent::Text { text } => message::AssistantContent::text(text),
+                let mut assistant_content = Vec::new();
 
-                        // TODO: Currently, refusals are converted into text, but should be
-                        //  investigated for generalization.
-                        AssistantContent::Refusal { refusal } => {
-                            message::AssistantContent::text(refusal)
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                if let Some(reasoning) = reasoning
+                    && !reasoning.is_empty()
+                {
+                    assistant_content.push(message::AssistantContent::reasoning(reasoning));
+                }
 
-                content.extend(
+                assistant_content.extend(content.into_iter().map(|content| match content {
+                    AssistantContent::Text { text } => message::AssistantContent::text(text),
+                    AssistantContent::Refusal { refusal } => {
+                        message::AssistantContent::text(refusal)
+                    }
+                }));
+
+                assistant_content.extend(
                     tool_calls
                         .into_iter()
                         .map(|tool_call| Ok(message::AssistantContent::ToolCall(tool_call.into())))
@@ -684,7 +696,7 @@ impl TryFrom<Message> for message::Message {
 
                 message::Message::Assistant {
                     id: None,
-                    content: OneOrMany::many(content).map_err(|_| {
+                    content: OneOrMany::many(assistant_content).map_err(|_| {
                         message::MessageError::ConversionError(
                             "Neither `content` nor `tool_calls` was provided to the Message"
                                 .to_owned(),
@@ -800,6 +812,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             Message::Assistant {
                 content,
                 tool_calls,
+                reasoning,
                 ..
             } => {
                 let mut content = content
@@ -816,6 +829,13 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                         }
                     })
                     .collect::<Vec<_>>();
+
+                if let Some(reasoning) = reasoning {
+                    // llama.cpp exposes hidden reasoning on a separate non-standard field.
+                    // Keep it structured here so the non-streaming path matches streaming
+                    // behavior and does not pollute plain-text response surfaces.
+                    content.push(completion::AssistantContent::reasoning(reasoning));
+                }
 
                 content.extend(
                     tool_calls
@@ -884,19 +904,51 @@ impl ProviderResponseExt for CompletionResponse {
     }
 
     fn get_text_response(&self) -> Option<String> {
-        let Message::User { ref content, .. } = self.choices.last()?.message.clone() else {
-            return None;
-        };
+        let response = self
+            .choices
+            .iter()
+            .filter_map(|choice| assistant_message_text_response(&choice.message))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        let UserContent::Text { text } = content.first() else {
-            return None;
-        };
-
-        Some(text)
+        if response.is_empty() {
+            None
+        } else {
+            Some(response)
+        }
     }
 
     fn get_usage(&self) -> Option<Self::Usage> {
         self.usage.clone()
+    }
+}
+
+fn assistant_message_text_response(message: &Message) -> Option<String> {
+    let Message::Assistant {
+        content, refusal, ..
+    } = message
+    else {
+        return None;
+    };
+
+    let mut segments = content
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text { text } => (!text.is_empty()).then(|| text.clone()),
+            AssistantContent::Refusal { refusal } => (!refusal.is_empty()).then(|| refusal.clone()),
+        })
+        .collect::<Vec<_>>();
+
+    if segments.is_empty()
+        && let Some(refusal) = refusal.as_ref().filter(|refusal| !refusal.is_empty())
+    {
+        segments.push(refusal.clone());
+    }
+
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join("\n"))
     }
 }
 
@@ -1355,6 +1407,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::ProviderResponseExt;
 
     #[test]
     fn test_openai_request_uses_request_model_override() {
@@ -1413,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_reasoning_is_silently_skipped() {
+    fn assistant_reasoning_alone_is_dropped() {
         let assistant_content = OneOrMany::one(message::AssistantContent::reasoning("hidden"));
 
         let converted: Vec<Message> = assistant_content
@@ -1423,8 +1476,12 @@ mod tests {
         assert!(converted.is_empty());
     }
 
+    // Regression test: providers that serve thinking models over the OpenAI
+    // Chat Completions schema (DeepSeek-R1, GLM-4.6, Qwen3-Thinking) return
+    // 400 "thinking is enabled but reasoning_content is missing" on the next
+    // turn if the prior assistant tool-call message didn't echo the reasoning.
     #[test]
-    fn assistant_text_and_tool_call_are_preserved_when_reasoning_is_present() {
+    fn assistant_reasoning_is_attached_to_tool_call_message() {
         let assistant_content = OneOrMany::many(vec![
             message::AssistantContent::reasoning("hidden"),
             message::AssistantContent::text("visible"),
@@ -1445,6 +1502,7 @@ mod tests {
             Message::Assistant {
                 content,
                 tool_calls,
+                reasoning,
                 ..
             } => {
                 assert_eq!(
@@ -1460,9 +1518,105 @@ mod tests {
                     tool_calls[0].function.arguments,
                     serde_json::json!({"x": 2, "y": 1})
                 );
+                assert_eq!(reasoning.as_deref(), Some("hidden"));
             }
             _ => panic!("expected assistant message"),
         }
+
+        let json = serde_json::to_value(&converted[0]).expect("serialize");
+        assert_eq!(json["reasoning_content"], "hidden");
+    }
+
+    #[test]
+    fn assistant_reasoning_roundtrips_back_to_rig_message() {
+        let assistant = Message::Assistant {
+            content: vec![AssistantContent::Text {
+                text: "visible".to_string(),
+            }],
+            reasoning: Some("hidden".to_string()),
+            refusal: None,
+            audio: None,
+            name: None,
+            tool_calls: vec![],
+        };
+
+        let rig_msg: message::Message = assistant.try_into().expect("convert back");
+
+        let message::Message::Assistant { content, .. } = rig_msg else {
+            panic!("expected assistant");
+        };
+
+        let items: Vec<_> = content.into_iter().collect();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0], message::AssistantContent::Reasoning(_)));
+        assert!(matches!(items[1], message::AssistantContent::Text(_)));
+    }
+
+    #[test]
+    fn provider_response_text_response_reads_assistant_multipart_output() {
+        let response = CompletionResponse {
+            id: "resp_123".to_owned(),
+            object: "chat.completion".to_owned(),
+            created: 0,
+            model: GPT_4O.to_owned(),
+            system_fingerprint: None,
+            choices: vec![Choice {
+                index: 0,
+                message: Message::Assistant {
+                    content: vec![
+                        AssistantContent::Text {
+                            text: "first".to_owned(),
+                        },
+                        AssistantContent::Refusal {
+                            refusal: "second".to_owned(),
+                        },
+                        AssistantContent::Text {
+                            text: "third".to_owned(),
+                        },
+                    ],
+                    reasoning: Some("hidden".to_owned()),
+                    refusal: None,
+                    audio: None,
+                    name: None,
+                    tool_calls: vec![],
+                },
+                logprobs: None,
+                finish_reason: "stop".to_owned(),
+            }],
+            usage: None,
+        };
+
+        assert_eq!(
+            response.get_text_response(),
+            Some("first\nsecond\nthird".to_owned())
+        );
+    }
+
+    #[test]
+    fn provider_response_text_response_falls_back_to_assistant_refusal_field() {
+        let response = CompletionResponse {
+            id: "resp_123".to_owned(),
+            object: "chat.completion".to_owned(),
+            created: 0,
+            model: GPT_4O.to_owned(),
+            system_fingerprint: None,
+            choices: vec![Choice {
+                index: 0,
+                message: Message::Assistant {
+                    content: vec![],
+                    reasoning: None,
+                    refusal: Some("blocked".to_owned()),
+                    audio: None,
+                    name: None,
+                    tool_calls: vec![],
+                },
+                logprobs: None,
+                finish_reason: "stop".to_owned(),
+            }],
+            usage: None,
+        };
+
+        assert_eq!(response.get_text_response(), Some("blocked".to_owned()));
     }
 
     #[test]
@@ -1747,6 +1901,65 @@ mod tests {
         assert_eq!(
             tool_calls[0].function.arguments,
             serde_json::json!({"city": "Paris"})
+        );
+    }
+
+    #[test]
+    fn deserialize_llama_cpp_response_with_reasoning_content() {
+        let request = r#"
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "Now I understand the structure better. I need to: ..."
+                    }
+                }
+            ],
+            "created": 1776750378,
+            "model": "unsloth/Qwen3.6-35B-A3B-GGUF:Q8_0",
+            "system_fingerprint": "fp_xxx",
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 920,
+                "prompt_tokens": 27806,
+                "total_tokens": 28726,
+                "prompt_tokens_details": { "cached_tokens": 18698 }
+            },
+            "id": "chatcmpl-xxxx",
+            "timings": {
+                "cache_n": 18698,
+                "prompt_n": 9108,
+                "prompt_ms": 226645.81,
+                "prompt_per_token_ms": 24.884256697408873,
+                "prompt_per_second": 40.186050648807495,
+                "predicted_n": 920,
+                "predicted_ms": 177167.955,
+                "predicted_per_token_ms": 192.57386413043477,
+                "predicted_per_second": 5.192812661860888
+            }
+        }
+        "#;
+        let response = serde_json::from_str::<ApiResponse<CompletionResponse>>(request).unwrap();
+        let ApiResponse::Ok(response) = response else {
+            panic!("expected successful completion response");
+        };
+
+        let response: completion::CompletionResponse<CompletionResponse> =
+            response.try_into().unwrap();
+
+        assert_eq!(response.choice.len(), 1);
+
+        let completion::message::AssistantContent::Reasoning(reasoning) = response.choice.first()
+        else {
+            panic!("expected assistant content to be reasoning");
+        };
+        assert_eq!(
+            reasoning.first_text(),
+            Some("Now I understand the structure better. I need to: ...")
         );
     }
 }
