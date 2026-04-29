@@ -1,6 +1,6 @@
 [package]
 name = "rig-fastembed"
-version = "0.3.4"
+version = "0.4.0"
 edition = { workspace = true }
 license = "MIT"
 readme = "README.md"
@@ -11,7 +11,7 @@ repository = "https://github.com/0xPlaygrounds/rig"
 workspace = true
 
 [dependencies]
-rig-core = { path = "../../rig/rig-core", version = "0.35.0", default-features = false }
+rig-core = { path = "../../rig/rig-core", version = "0.36.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -23,10 +23,11 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [features]
-default = ["hf-hub", "ort-download-binaries", "hf-hub-native-tls"]
+default = ["hf-hub", "ort-download-binaries", "hf-hub-rustls-tls"]
 
 hf-hub = ["fastembed/hf-hub"]
 ort-download-binaries = ["fastembed/ort-download-binaries"]
+hf-hub-rustls-tls = ["fastembed/hf-hub-rustls-tls"]
 hf-hub-native-tls = ["fastembed/hf-hub-native-tls"]
 
 [[example]]

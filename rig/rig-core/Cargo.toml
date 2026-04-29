@@ -1,6 +1,6 @@
 [package]
 name = "rig-core"
-version = "0.35.0"
+version = "0.36.0"
 edition = { workspace = true }
 license = "MIT"
 readme = "README.md"
@@ -33,7 +33,7 @@ ordered-float = { workspace = true }
 quick-xml = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
-rig-derive = { version = "0.1.12", path = "../rig-derive", optional = true }
+rig-derive = { version = "0.1.13", path = "../rig-derive", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -53,7 +53,7 @@ pin-project-lite = "0.2.16"
 futures-timer = "3.0.3"
 wasm-bindgen-futures = { version = "0.4.54", optional = true }
 mime = "0.3.17"
-reqwest-middleware = { version = "0.5.1", optional = true, features = [
+reqwest-middleware = { version = "0.5.1", default-features = false, optional = true, features = [
   "json",
   "multipart",
   "charset",
@@ -63,7 +63,7 @@ reqwest-middleware = { version = "0.5.1", optional = true, features = [
 # Native-only dependency for OpenAI Responses websocket mode.
 # Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio-tungstenite = { version = "0.23.1", optional = true }
+tokio-tungstenite = { version = "0.23.1", default-features = false, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -75,11 +75,12 @@ redis = { version = "1.0.2", features = ["tokio-comp", "aio", "vector-sets"] }
 serde_path_to_error = { workspace = true }
 base64 = { workspace = true }
 reqwest-retry = { version = "0.9" }
-reqwest-middleware = { version = "0.5", features = [
+reqwest-middleware = { version = "0.5", default-features = false, features = [
   "json",
   "multipart",
   "charset",
   "http2",
+  "rustls",
 ] }
 
 # Required for `rmcp` example
@@ -97,10 +98,10 @@ rmcp = { version = "1", features = [
 axum = "0.8.4"
 
 # required for otel
-opentelemetry = "0.30.0"
-opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
-opentelemetry-otlp = "0.30.0"
-tracing-opentelemetry = "0.31.0"
+opentelemetry = "0.31.0"
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.31.0"
+tracing-opentelemetry = "0.32.1"
 
 
 [features]
@@ -126,12 +127,22 @@ reqwest = [
   "reqwest/http2",
   "reqwest/system-proxy",
 ]
-websocket = ["dep:tokio-tungstenite"]
+websocket = ["websocket-rustls"]
+websocket-rustls = [
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/connect",
+  "rustls",
+]
+websocket-native-tls = [
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/connect",
+  "native-tls",
+]
 rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
 native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
-reqwest-middleware = ["dep:reqwest-middleware"]
+reqwest-middleware = ["reqwest-middleware-rustls"]
 reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
-reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls", "reqwest/native-tls"]
+reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]
 
 [[example]]
 name = "rag"
