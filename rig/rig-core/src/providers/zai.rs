@@ -70,10 +70,11 @@ pub struct ZAiAnthropicExt;
 type ZAiApiKey = BearerAuth;
 
 pub type Client<H = reqwest::Client> = client::Client<ZAiExt, H>;
-pub type ClientBuilder<H = reqwest::Client> = client::ClientBuilder<ZAiBuilder, ZAiApiKey, H>;
+pub type ClientBuilder<H = crate::markers::Missing> =
+    client::ClientBuilder<ZAiBuilder, ZAiApiKey, H>;
 
 pub type AnthropicClient<H = reqwest::Client> = client::Client<ZAiAnthropicExt, H>;
-pub type AnthropicClientBuilder<H = reqwest::Client> =
+pub type AnthropicClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<ZAiAnthropicBuilder, AnthropicKey, H>;
 
 impl Provider for ZAiExt {

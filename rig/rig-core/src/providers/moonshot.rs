@@ -149,10 +149,10 @@ impl<H> Capabilities<H> for MoonshotAnthropicExt {
 }
 
 pub type Client<H = reqwest::Client> = client::Client<MoonshotExt, H>;
-pub type ClientBuilder<H = reqwest::Client> =
+pub type ClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MoonshotBuilder, MoonshotApiKey, H>;
 pub type AnthropicClient<H = reqwest::Client> = client::Client<MoonshotAnthropicExt, H>;
-pub type AnthropicClientBuilder<H = reqwest::Client> =
+pub type AnthropicClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MoonshotAnthropicBuilder, AnthropicKey, H>;
 
 impl ProviderClient for Client {
